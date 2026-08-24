@@ -108,6 +108,9 @@ def main() -> None:
         },
     }
     print(json.dumps(result, indent=2))
+    import os
+
+    os.makedirs("results", exist_ok=True)
     with open(
         f"results/bench_c{args.concurrency}_b{args.batch_size}_w{args.words}.json",
         "w",

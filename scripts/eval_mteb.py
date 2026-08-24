@@ -99,8 +99,11 @@ def main() -> int:
     ap.add_argument("--output", default="results/mteb")
     args = ap.parse_args()
 
+    import os
+
     import mteb
 
+    os.makedirs("results", exist_ok=True)
     model = RemoteQwen3Embedding(args.base_url)
     rows = []
     for task_name in args.tasks:

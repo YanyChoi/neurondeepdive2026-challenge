@@ -1,0 +1,137 @@
+CONFIG DIFF  meta-llama/Llama-3.1-8B  vs  Qwen/Qwen3-Embedding-8B
+====================================================================================================
+field                    Llama-3.1-8B                          Qwen3-Embedding-8B
+----------------------------------------------------------------------------------------------------
+architectures            ["LlamaForCausalLM"]                  ["Qwen3ForCausalLM"]
+bos_token_id             128000                                151643
+                         -> tokenizer only, no model code change
+eos_token_id             [128001, 128008, 128009]              151645
+                         -> tokenizer only, no model code change
+intermediate_size        14336                                 12288
+                         -> config.py — MLP weight shapes (12288 vs 14336)
+max_position_embeddings  131072                                40960
+                         -> config.py — max context (40960 vs 131072)
+max_window_layers        "\u2014"                              36
+                         -> not used — no attention change
+mlp_bias                 false                                 "\u2014"
+model_type               "llama"                               "qwen3"
+                         -> registry — but NOTE architectures is still Qwen3ForCausalLM
+num_hidden_layers        32                                    36
+                         -> config.py defaults / KV spec (36 vs 32 layers)
+pretraining_tp           1                                     "\u2014"
+rms_norm_eps             1e-05                                 1e-06
+                         -> config.py — every RMSNorm (1e-6 vs 1e-5)
+rope_scaling             {"factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0, "original_max_position_embeddings": 8192, "rope_type": "llama3"}null
+                         -> model.py — DELETE the Llama-3.1 piecewise rope scaling: Qwen3 uses standard rotate_half RoPE
+rope_theta               500000.0                              1000000
+                         -> model.py RotaryEmbedding — base frequency (1e6 vs 5e5)
+sliding_window           "\u2014"                              null
+                         -> not used (use_sliding_window=false) — no attention change
+transformers_version     "4.42.3"                              "4.51.2"
+                         -> (irrelevant)
+use_sliding_window       "\u2014"                              false
+                         -> not used — no attention change
+vocab_size               128256                                151665
+                         -> config.py — embed_tokens shape (151665 vs 128256)
+----------------------------------------------------------------------------------------------------
+identical fields (11): attention_bias, attention_dropout, head_dim, hidden_act, hidden_size, initializer_range, num_attention_heads, num_key_value_heads, tie_word_embeddings, torch_dtype, use_cache
+
+STRUCTURAL DIFF (beyond config.json)
+------------------------------------
+1. Per-head QK-norm — THE model-code diff.
+   Qwen3 checkpoints carry per-layer weights Llama does not have:
+       layers.N.self_attn.q_norm.weight   [head_dim=128]
+       layers.N.self_attn.k_norm.weight   [head_dim=128]
+   RMSNorm over head_dim, applied per head BEFORE RoPE.
+   -> model.py: add q_norm/k_norm modules + apply in forward_prefill;
+      decode megakernel flag rmsnorm_QK_pre_rope_enabled=True.
+   -> load_weights: add the two mappings (replicated, NOT TP-sharded).
+
+2. No LM head. Qwen3-Embedding-8B ships no lm_head.weight; its weight keys
+   also drop the "model." prefix ("embed_tokens.weight", not
+   "model.embed_tokens.weight").
+   -> model_embedding.py: drop lm_head entirely; adjust checkpoint-side
+      mapping keys.
+
+3. Embedding output stage. The checkpoint is a sentence-transformers model:
+   modules.json = Transformer -> Pooling(lasttoken) -> Normalize.
+   -> forward returns the flattened [T, H] post-norm hidden states; vLLM's
+      pooling runner does LAST-token gather + L2 normalize (DispatchPooler).
+   -> serve with --runner pooling. Prefill-only: no decode graph at all.
+
+4. architectures in config.json is still ["Qwen3ForCausalLM"].
+   -> Stage 2 registers our factory under that exact string; the pooling
+      runner (--runner pooling), not the arch name, selects the embedding path.
+
+WHAT CARRIES OVER FROM THE llama3/ TEMPLATE UNCHANGED
+-----------------------------------------------------
+- TP head sharding & GQA replication (both are 8-KV-head GQA)
+- SP all-gather / reduce-scatter around attention and MLP
+- SiLU gate/up/down MLP structure (only dims change)
+- Standard RMSNorm layers (input/post-attention/final), only eps changes
+- KV-cache block layout, weight-loader utilities, sampler (unused for pooling)
+
+
+================================================================================
+  2. 모델 구조 출력 (meta device, weight 로드 없음)
+================================================================================
+
+### meta-llama/Llama-3.1-8B 구조 ###
+
+  LlamaForCausalLM(
+    (model): LlamaModel(
+      (embed_tokens): Embedding(128256, 4096)
+      (layers): ModuleList(
+        (0-31): 32 x LlamaDecoderLayer(
+          (self_attn): LlamaAttention(
+            (q_proj): Linear(in_features=4096, out_features=4096, bias=False)
+            (k_proj): Linear(in_features=4096, out_features=1024, bias=False)
+            (v_proj): Linear(in_features=4096, out_features=1024, bias=False)
+            (o_proj): Linear(in_features=4096, out_features=4096, bias=False)
+          )
+          (mlp): LlamaMLP(
+            (gate_proj): Linear(in_features=4096, out_features=14336, bias=False)
+            (up_proj): Linear(in_features=4096, out_features=14336, bias=False)
+            (down_proj): Linear(in_features=14336, out_features=4096, bias=False)
+            (act_fn): SiLUActivation()
+          )
+          (input_layernorm): LlamaRMSNorm((4096,), eps=1e-05)
+          (post_attention_layernorm): LlamaRMSNorm((4096,), eps=1e-05)
+        )
+      )
+      (norm): LlamaRMSNorm((4096,), eps=1e-05)
+      (rotary_emb): LlamaRotaryEmbedding()
+    )
+    (lm_head): Linear(in_features=4096, out_features=128256, bias=False)
+  )
+
+### Qwen/Qwen3-Embedding-8B 구조 ###
+
+  Qwen3ForCausalLM(
+    (model): Qwen3Model(
+      (embed_tokens): Embedding(151665, 4096)
+      (layers): ModuleList(
+        (0-35): 36 x Qwen3DecoderLayer(
+          (self_attn): Qwen3Attention(
+            (q_proj): Linear(in_features=4096, out_features=4096, bias=False)
+            (k_proj): Linear(in_features=4096, out_features=1024, bias=False)
+            (v_proj): Linear(in_features=4096, out_features=1024, bias=False)
+            (o_proj): Linear(in_features=4096, out_features=4096, bias=False)
+            (q_norm): Qwen3RMSNorm((128,), eps=1e-06)
+            (k_norm): Qwen3RMSNorm((128,), eps=1e-06)
+          )
+          (mlp): Qwen3MLP(
+            (gate_proj): Linear(in_features=4096, out_features=12288, bias=False)
+            (up_proj): Linear(in_features=4096, out_features=12288, bias=False)
+            (down_proj): Linear(in_features=12288, out_features=4096, bias=False)
+            (act_fn): SiLUActivation()
+          )
+          (input_layernorm): Qwen3RMSNorm((4096,), eps=1e-06)
+          (post_attention_layernorm): Qwen3RMSNorm((4096,), eps=1e-06)
+        )
+      )
+      (norm): Qwen3RMSNorm((4096,), eps=1e-06)
+      (rotary_emb): Qwen3RotaryEmbedding()
+    )
+    (lm_head): Linear(in_features=4096, out_features=151665, bias=False)
+  )

@@ -132,7 +132,47 @@ def main() -> int:
     print("-" * 100)
     print(f"identical fields ({len(same)}): {', '.join(k for k, *_ in same)}")
     print(STRUCTURE_NOTES)
+    print_module_structures(llama, qwen)
     return 0
+
+
+def print_module_structures(llama_cfg: dict, qwen_cfg: dict) -> None:
+    """Part 2 of the official onboarding Step 0 script: instantiate both
+    models on the meta device (no weights, no memory) and print the module
+    tree, so the structural diff (q_norm/k_norm, lm_head, ...) is observed
+    rather than asserted.
+
+    Unlike the official script we build the configs from the bundled JSONs
+    instead of ``AutoConfig.from_pretrained`` — Llama-3.1-8B is gated on HF,
+    and this works offline. Skipped gracefully if transformers/torch are not
+    installed.
+    """
+    try:
+        import torch
+        from transformers import AutoConfig, AutoModelForCausalLM
+    except ImportError as e:
+        print(f"\n[structure dump skipped — pip install transformers torch] ({e})")
+        return
+
+    print("\n" + "=" * 80)
+    print("  2. 모델 구조 출력 (meta device, weight 로드 없음)")
+    print("=" * 80)
+
+    for name, cfg_dict in ((LLAMA_ID, llama_cfg), (QWEN_ID, qwen_cfg)):
+        print(f"\n### {name} 구조 ###\n")
+        try:
+            cfg_dict = {k: v for k, v in cfg_dict.items() if k != "architectures"}
+            config = AutoConfig.for_model(cfg_dict.pop("model_type"), **cfg_dict)
+            with torch.device("meta"):
+                model = AutoModelForCausalLM.from_config(config)
+            lines = str(model).split("\n")
+            for line in lines[:60]:
+                print(f"  {line}")
+            if len(lines) > 60:
+                print(f"  ... ({len(lines) - 60} more lines)")
+            del model
+        except Exception as e:  # noqa: BLE001
+            print(f"  [ERROR] {e}")
 
 
 if __name__ == "__main__":

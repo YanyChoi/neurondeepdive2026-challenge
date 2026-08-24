@@ -11,6 +11,8 @@ MAX_LEN="${MAX_LEN:-4096}"
 # Qwen3-Embedding compilation/execution timeouts (per the official tutorial).
 export VLLM_NEURON_COMPILATION_TIMEOUT=1200
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200
+# trn2.3xlarge has no EFA; affinity is a CPU perf optimization only.
+export NEURON_SKIP_EFA_AFFINITY=1
 
 # --runner pooling is REQUIRED: the checkpoint declares
 # architectures=["Qwen3ForCausalLM"], so without it vLLM loads it as a

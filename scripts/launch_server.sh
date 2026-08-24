@@ -22,6 +22,7 @@ exec vllm serve "$MODEL" \
     --runner pooling \
     --dtype bfloat16 \
     --max-model-len "$MAX_LEN" \
+    --max-num-batched-tokens "$MAX_LEN" \
     --tensor-parallel-size "$TP" \
     --port "$PORT" \
     --no-enable-prefix-caching \

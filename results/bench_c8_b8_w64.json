@@ -1,0 +1,16 @@
+{
+  "concurrency": 8,
+  "batch_size": 8,
+  "words_per_text": 64,
+  "completed_requests": 200,
+  "errors": 0,
+  "wall_seconds": 41.95,
+  "requests_per_sec": 4.77,
+  "embeddings_per_sec": 38.14,
+  "latency_ms": {
+    "mean": 1621.1,
+    "p50": 1620.3,
+    "p95": 1647.0,
+    "p99": 1651.2
+  }
+}

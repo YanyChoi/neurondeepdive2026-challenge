@@ -1,0 +1,23 @@
+[
+  {
+    "task": "STS12",
+    "metric": "cosine_spearman",
+    "score": 0.8639295239532307,
+    "published": 0.8614,
+    "neuron_ref": 0.8639
+  },
+  {
+    "task": "NFCorpus",
+    "metric": "ndcg_at_10",
+    "score": 0.4159,
+    "published": 0.4145,
+    "neuron_ref": 0.4143
+  },
+  {
+    "task": "SciFact",
+    "metric": "ndcg_at_10",
+    "score": 0.78591,
+    "published": 0.7846,
+    "neuron_ref": 0.7839
+  }
+]

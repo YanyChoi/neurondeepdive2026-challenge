@@ -84,13 +84,29 @@ python3 scripts/eval_mteb.py
 ```
 
 쿼리에는 공식 Qwen3 instruction 템플릿(`Instruct: {task}\nQuery: {text}`)을 적용하고
-문서는 그대로 임베딩합니다. 기준값:
+문서는 그대로 임베딩합니다.
 
-| Task | Metric | 공식 MTEB (published) | Neuron BF16 (공식 레시피) | 본 구현 |
-|---|---|---|---|---|
-| STS12 | Spearman | 0.8614 | 0.8639 | _(측정 예정)_ |
-| NFCorpus | NDCG@10 | 0.4145 | 0.4143 | _(측정 예정)_ |
-| SciFact | NDCG@10 | 0.7846 | 0.7839 | _(측정 예정)_ |
+**측정 결과 (2026-08-24, trn2.3xlarge TP=4, BF16, 본 레포 구현):**
+
+| Task | Metric | 공식 MTEB (published) | Neuron BF16 (공식 레시피) | **본 구현** | Δ vs published |
+|---|---|---|---|---|---|
+| STS12 | Spearman | 0.8614 | 0.8639 | **0.8639** | +0.0025 |
+| NFCorpus | NDCG@10 | 0.4145 | 0.4143 | **0.4159** | +0.0014 |
+| SciFact | NDCG@10 | 0.7846 | 0.7839 | **0.7859** | +0.0013 |
+
+세 태스크 모두 published 점수 대비 ±0.005 이내 → PASS. STS12는 공식 레시피의
+Neuron BF16 값(0.8639)과 소수 4자리까지 일치합니다. 원본:
+[`results/mteb_summary.json`](results/mteb_summary.json)
+
+스모크 테스트 결과 (Stage 3):
+
+```
+[1/4] /health OK
+[2/4] 3 embeddings, dim=4096 OK
+[3/4] L2-normalized OK (norms=[1.0, 1.0, 1.0])
+[4/4] cos(query, Paris doc)=0.6442  cos(query, mitochondria doc)=0.1464
+SMOKE TEST PASSED
+```
 
 ## Stage 5 — Benchmark
 
@@ -98,7 +114,42 @@ python3 scripts/eval_mteb.py
 python3 scripts/benchmark.py --concurrency 8 --batch-size 8 --num-requests 200
 ```
 
-requests/sec, embeddings/sec, latency p50/p95/p99를 `results/`에 저장합니다.
+**측정 결과 (~64단어/텍스트, trn2.3xlarge TP=4):**
+
+| concurrency × batch | embeddings/sec | requests/sec | p50 | p99 |
+|---|---|---|---|---|
+| 1 × 1 (레이턴시) | 32.0 | 32.0 | **31.1 ms** | 33.3 ms |
+| 8 × 8 | **38.1** | 4.77 | 1620 ms | 1651 ms |
+| 16 × 16 | 35.8 | 2.24 | 6487 ms | 6553 ms |
+
+단일 요청 레이턴시 ~31ms, 처리량은 c8×b8 부근(~38 emb/s)에서 포화됩니다 —
+8B 모델의 prefill이 compute-bound라 동시성을 더 올려도 큐잉만 늘어납니다.
+원본: [`results/bench_*.json`](results/)
+
+## 트러블슈팅 기록 (소스 설치 시)
+
+공식 DLC 대신 소스로 설치하면 만나는 문제들 (전부 `scripts/setup_env.sh`에 반영됨):
+
+1. **`torch-neuronx`를 설치하면 안 됩니다.** release-0.24는 `libtorch-neuronx-lite`
+   (torch 2.11) 기반의 native PyTorch 스택입니다. pip repo의 torch-neuronx는 최신이
+   2.9라서 설치하면 torch/torch-xla가 2.9로 다운그레이드되고 cu12/cu13 nvidia 라이브러리가
+   충돌합니다 (`libtorch_cuda.so: undefined symbol: ncclDevCommDestroy`).
+2. **`nki` 0.6.0 필수** (`nkilib`가 이 wheel에 포함). neuronx-cc 2.26은 nki 0.5를
+   강제해서 `nkilib ... cannot import name 'CPCollectiveMode'`로 플러그인 로드가 깨집니다.
+3. **`islpy==2026.1` 고정 필수.** islpy 2026.2.1(2026-08 릴리스)이 neuronx-cc 2.27의
+   Simplifier를 깨뜨립니다:
+   `[NCC_ISMP902] Simplifier error: is_subset(): incompatible function arguments`.
+   서버 로그에는 `neuronx-cc compilation failed with 70`만 남고, 실제 원인은
+   log-neuron-cc.txt가 아니라 **컴파일러 stdout**에만 찍히므로 로그의 neuronx-cc 명령을
+   수동 재실행해야 보입니다. DLC는 빌드 시점 버전이 얼려져 있어 이 문제가 없습니다.
+4. **trn2.3xlarge에는 EFA가 없습니다** → `NEURON_SKIP_EFA_AFFINITY=1`.
+5. **버킷 규칙**: `num_batched_tokens_buckets`의 마지막 값 = `--max-num-batched-tokens`
+   (vLLM 기본 2048). 튜토리얼의 `[128..4096]` 버킷은 `--max-num-batched-tokens 4096`을
+   전제로 합니다.
+
+검증 기준 버전 (DLC `vllm/inference/0.24.0.1.1.0/Dockerfile.neuronx` 고정값):
+`neuronx-cc==2.27.5334.0+f702b353`, `nki==0.6.0+31049202112.g85070674`,
+`libtorch-neuronx-lite==2.11.0.1.0.1284+f49d8626`, torch/torch-xla 2.11.0.
 
 ## 메모
 

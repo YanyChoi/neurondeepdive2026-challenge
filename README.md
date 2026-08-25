@@ -10,8 +10,7 @@ vLLM Neuron Plugin(release-0.24)에 직접 온보딩하고, trn2.3xlarge(4 Neuro
 ## 레포 구조
 
 ```
-step0_arch_diff.py            # Step 0: Llama vs Qwen3-Embedding 아키텍처 diff
-configs/                      # 비교에 쓰는 두 모델의 config.json
+arch_diff_analysis.py         # Step 0: Llama vs Qwen3-Embedding 아키텍처 diff (공식 스크립트)
 src/qwen3_embedding/          # Stage 1: llama3/ 템플릿 → Qwen3-Embedding 포팅
   ├── config.py               #   HF config → dataclass (8B 파라미터)
   ├── model.py                #   백본 (QK-norm, 표준 RoPE 등 수정 적용)
@@ -35,9 +34,6 @@ scripts/
 # meta-llama/Llama-3.1-8B는 gated → hf auth login 필요
 python3 arch_diff_analysis.py        # 출력: results/step0_official_output.txt
 ```
-
-보조 스크립트 `step0_arch_diff.py`는 같은 비교를 HF 토큰 없이(bundled config)
-수행하고, 필드별로 어느 코드가 바뀌는지 주석을 답니다.
 
 config.json 필드 비교 + 체크포인트 구조 비교 결과 요약:
 

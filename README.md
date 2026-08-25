@@ -35,16 +35,16 @@ python3 arch_diff_analysis.py        # 출력: results/step0_official_output.txt
 
 ### Diff 결과 해석 (가이드 체크리스트 기준)
 
-| # | 비교 항목 | 관찰된 diff | 영향받는 코드 |
-|---|---|---|---|
-| 1 | Attention 방식 | heads 32/8·head_dim 128 동일. `layer_types`=전부 full_attention, sliding window 없음. **구조 dump에서 `q_norm`/`k_norm` (per-head RMSNorm, dim=128) 발견 — Llama에 없는 최대 diff** | `model.py` — QK-norm을 RoPE **이전에** per-head 적용 (prefill: torch, decode: megakernel `rmsnorm_QK_pre_rope_enabled=True`), weight mapping 2개 추가(TP 샤딩 없음) |
-| 2 | Heterogeneous Layers | 없음 (36층 모두 동일) | — |
-| 3 | Position Encoding | `rope_theta` 5e5→**1e6**, `rope_scaling` llama3 piecewise→**None** | `model.py` — Llama3 스케일링 삭제, 표준 rotate_half |
-| 4 | MLP/Activation | `hidden_act` silu 동일, `intermediate_size` 14336→**12288** | 치수만 변경, NF 경로 호환 |
-| 5 | Normalization | `rms_norm_eps` 1e-5→**1e-6** (타입은 동일 RMSNorm) | `config.py` |
-| 6 | Config 구조 | 둘 다 top-level (nested 없음) | `from_configs()` 그대로 |
-| 7 | Embedding | `vocab_size` 128256→**151665**, tie 없음 | embed_tokens 치수 |
-| 8 | Special features | **임베딩 체크포인트**: lm_head 없음, weight key에 `model.` prefix 없음, sentence-transformers 메타(modules.json: Transformer→LAST Pooling→Normalize), `architectures`는 여전히 `Qwen3ForCausalLM` | `model_embedding.py` + `--runner pooling` |
+| # | 비교 항목 | Llama-3.1-8B | Qwen3-Embedding-8B | 영향받는 코드 |
+|---|---|---|---|---|
+| 1 | Attention 방식 | 32Q/8KV GQA, head_dim 128, **QK-norm 없음**, sliding window 없음 | 32Q/8KV GQA, head_dim 128, **`q_norm`/`k_norm` per-head RMSNorm(dim=128)** — 구조 dump에서 발견된 최대 diff. `layer_types`=전부 full_attention | `model.py` — QK-norm을 RoPE **이전에** per-head 적용 (prefill: torch, decode: megakernel `rmsnorm_QK_pre_rope_enabled=True`), weight mapping 2개 추가(TP 샤딩 없음) |
+| 2 | Heterogeneous Layers | 없음 — 32층 전부 동일 | 없음 — 36층 전부 동일 (full_attention ×36) | 레이어 수만 config 값 |
+| 3 | Position Encoding | `rope_theta`=500,000 + **`rope_scaling`: llama3 piecewise (factor 8)** | `rope_theta`=**1,000,000**, `rope_scaling`=**None** (표준 rotate_half) | `model.py` — Llama3 스케일링 코드 삭제 |
+| 4 | MLP/Activation | silu, `intermediate_size`=14336 | silu, `intermediate_size`=**12288** | 치수만 변경, NF 경로 호환 |
+| 5 | Normalization | RMSNorm, `rms_norm_eps`=1e-5 | RMSNorm, `rms_norm_eps`=**1e-6** | `config.py` |
+| 6 | Config 구조 | top-level | top-level (nested 없음) | `from_configs()` 그대로 |
+| 7 | Embedding | `vocab_size`=128256, `tie_word_embeddings`=false | `vocab_size`=**151665**, `tie_word_embeddings`=false | embed_tokens 치수 |
+| 8 | Special features | 일반 생성 체크포인트: `lm_head` 있음, weight key `model.` prefix, `architectures`=LlamaForCausalLM | **임베딩 체크포인트**: `lm_head` **없음**, weight key에 `model.` prefix **없음**, sentence-transformers 메타(modules.json: Transformer→LAST Pooling→Normalize), 그런데 `architectures`=**Qwen3ForCausalLM** (생성 모델과 동일) | `model_embedding.py` + `--runner pooling` |
 
 ## Stage 1: Implement (모델 구현)
 

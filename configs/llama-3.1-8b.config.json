@@ -3,7 +3,7 @@
   "attention_bias": false,
   "attention_dropout": 0.0,
   "bos_token_id": 128000,
-  "eos_token_id": [128001, 128008, 128009],
+  "eos_token_id": 128001,
   "hidden_act": "silu",
   "hidden_size": 4096,
   "initializer_range": 0.02,

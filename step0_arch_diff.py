@@ -92,7 +92,29 @@ def load_config(local: Path, repo_id: str, fetch: bool) -> dict:
         try:
             from transformers import AutoConfig
 
-            return AutoConfig.from_pretrained(repo_id).to_dict()
+            cfg = AutoConfig.from_pretrained(repo_id).to_dict()
+            # to_dict() mixes in dozens of generation-config defaults
+            # (top_k, num_beams, id2label, ...) that are not part of the
+            # model's config.json; drop them so the fetched diff matches
+            # the offline (raw config.json) diff.
+            from transformers import PretrainedConfig
+
+            boilerplate = set(PretrainedConfig().to_dict()) - {
+                # real config.json fields that PretrainedConfig also defaults
+                "architectures",
+                "torch_dtype",
+                "dtype",
+                "tie_word_embeddings",
+                "use_cache",
+                "bos_token_id",
+                "eos_token_id",
+                "model_type",
+            }
+            return {
+                k: v
+                for k, v in cfg.items()
+                if k not in boilerplate and k != "_name_or_path"
+            }
         except ImportError:
             url = f"https://huggingface.co/{repo_id}/raw/main/config.json"
             req = urllib.request.Request(url)

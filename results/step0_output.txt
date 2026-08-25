@@ -5,7 +5,7 @@ field                    Llama-3.1-8B                          Qwen3-Embedding-8
 architectures            ["LlamaForCausalLM"]                  ["Qwen3ForCausalLM"]
 bos_token_id             128000                                151643
                          -> tokenizer only, no model code change
-eos_token_id             [128001, 128008, 128009]              151645
+eos_token_id             128001                                151645
                          -> tokenizer only, no model code change
 intermediate_size        14336                                 12288
                          -> config.py — MLP weight shapes (12288 vs 14336)

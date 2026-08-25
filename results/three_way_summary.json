@@ -1,0 +1,26 @@
+{
+  "pass": true,
+  "rows": [
+    {
+      "pair": "neuron_vs_fp32",
+      "max_abs_diff": 0.0036874478682875633,
+      "mean_abs_diff": 0.00015400355914607644,
+      "min_cosine": 0.9998977780342102,
+      "mean_cosine": 0.999914824962616
+    },
+    {
+      "pair": "bf16_vs_fp32",
+      "max_abs_diff": 0.0029626013711094856,
+      "mean_abs_diff": 0.00015405897283926606,
+      "min_cosine": 0.9998952150344849,
+      "mean_cosine": 0.9999158382415771
+    },
+    {
+      "pair": "neuron_vs_bf16",
+      "max_abs_diff": 0.003377951681613922,
+      "mean_abs_diff": 0.0001989617885556072,
+      "min_cosine": 0.9998310804367065,
+      "mean_cosine": 0.9998614192008972
+    }
+  ]
+}

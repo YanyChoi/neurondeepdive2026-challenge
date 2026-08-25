@@ -12,6 +12,8 @@ import os
 
 os.environ["VLLM_NEURON_COMPILATION_TIMEOUT"] = "1200"
 os.environ["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"] = "1200"
+# trn2.3xlarge has no EFA; affinity is a CPU perf optimization only.
+os.environ.setdefault("NEURON_SKIP_EFA_AFFINITY", "1")
 
 from vllm import LLM  # noqa: E402
 
@@ -23,6 +25,9 @@ def main() -> None:
         dtype="bfloat16",
         max_model_len=4096,
         tensor_parallel_size=int(os.environ.get("TP", "4")),
+        # Short embedding requests share no prefix; single-shot prefill
+        # (max_num_batched_tokens == max_model_len) requires APC off.
+        enable_prefix_caching=False,
         additional_config={
             "neuron_config": {
                 "num_batched_tokens_buckets": [128, 256, 512, 1024, 2048, 4096]

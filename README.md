@@ -1,132 +1,204 @@
 # NDD Day-2 Challenge — Qwen3-Embedding-8B를 vLLM Neuron에 온보딩하기
 
-AWS Neuron Deep Dive Day-2 챌린지 과제: **Qwen/Qwen3-Embedding-8B**를
-vLLM Neuron Plugin(release-0.24)에 직접 온보딩하고, trn2.3xlarge(4 NeuronCores)에서
-검증/벤치마크합니다.
+AWS Neuron Deep Dive Day-2 챌린지: **Qwen/Qwen3-Embedding-8B**를 vLLM Neuron
+Plugin(release-0.24)에 직접 온보딩하고 trn2.3xlarge(4 NeuronCores)에서 검증합니다.
+진행 순서는 [vLLM Neuron 모델 온보딩 가이드](https://awslabs.github.io/accelerated-compute-tutorials/aws-ai-chip/inference/vllm/model-onboarding/)의
+5단계를 그대로 따랐습니다.
 
-- 온보딩 가이드: [awslabs accelerated-compute-tutorials — vLLM model onboarding](https://awslabs.github.io/accelerated-compute-tutorials/aws-ai-chip/inference/vllm/model-onboarding/)
 - 공식 레시피: [Neuron Docs — Qwen3-Embedding recipe](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/vllm-neuron/docs/model-recipes/qwen3-embedding-8b.html)
 
-## 레포 구조
+## 온보딩의 본질: 2-Phase 접근
 
-```
-arch_diff_analysis.py         # Step 0: Llama vs Qwen3-Embedding 아키텍처 diff (공식 스크립트)
-src/qwen3_embedding/          # Stage 1: llama3/ 템플릿 → Qwen3-Embedding 포팅
-  ├── config.py               #   HF config → dataclass (8B 파라미터)
-  ├── model.py                #   백본 (QK-norm, 표준 RoPE 등 수정 적용)
-  ├── model_embedding.py      #   pooling 러너용 임베딩 모델 (lm_head 제거)
-  └── factory.py              #   러너 타입에 따라 구현 선택 + 등록용 팩토리
-scripts/
-  ├── setup_env.sh            # DLC 컨테이너 or 소스 설치 (release-0.24)
-  ├── install_into_plugin.py  # Stage 2: 플러그인에 모델 설치 + registry 패치
-  ├── launch_server.sh        # Stage 3: vllm serve (--runner pooling, TP=4)
-  ├── smoke_test.py           # Stage 3: /v1/embeddings 스모크 테스트
-  ├── offline_embed.py        # Stage 3: LLM.embed() 오프라인 경로
-  ├── eval_mteb.py            # Stage 4: MTEB STS12/NFCorpus/SciFact
-  └── benchmark.py            # Stage 5: throughput/latency 측정
+- **Phase 1 (필수)**: `NF.qkv_proj`, `NF.flash_attention`, `NF.o_proj` 등 Plugin
+  빌딩블록으로 모델을 "교체" — NF 내부에 NKI 커널이 내장되어 있어 이것만으로
+  NKI 최적화가 적용됩니다. **본 챌린지는 Phase 1까지** 수행했습니다.
+- **Phase 2 (선택)**: 커스텀 NKI 커널 추가. 임베딩(prefill-only) 워크로드는 NF의
+  flash attention 경로로 충분해 적용하지 않았습니다.
+
+```text
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ 1. Implement    2. Register      3. Compile &    4. Validate    5. Benchmark  │
+│ (config/model/   (ModelRegistry)   Smoke Test     Accuracy       & Tune       │
+│  factory/weights)                                                             │
+└───────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Step 0 — 아키텍처 Diff 분석
+## Step 0: 아키텍처 Diff 분석
 
-온보딩 가이드의 공식 스크립트 그대로 (`MODEL_B`만 Qwen3-Embedding-8B로 지정):
+가이드의 공식 분석 스크립트 그대로 사용 (`MODEL_A`/`MODEL_B`만 지정):
 
 ```bash
-# meta-llama/Llama-3.1-8B는 gated → hf auth login 필요
+pip install transformers torch
+hf auth login                        # meta-llama/Llama-3.1-8B는 gated
 python3 arch_diff_analysis.py        # 출력: results/step0_official_output.txt
 ```
 
-config.json 필드 비교 + 체크포인트 구조 비교 결과 요약:
+### Diff 결과 해석 (가이드 체크리스트 기준)
 
-| 항목 | Llama-3.1-8B | Qwen3-Embedding-8B | 코드에 미치는 영향 |
+| # | 비교 항목 | 관찰된 diff | 영향받는 코드 |
 |---|---|---|---|
-| layers / hidden / interm | 32 / 4096 / 14336 | **36** / 4096 / **12288** | config.py 수치만 |
-| heads (Q/KV, head_dim) | 32 / 8, 128 | 32 / 8, 128 (명시적) | 동일 — GQA/TP 코드 재사용 |
-| vocab | 128256 | **151665** | config.py |
-| **QK-norm** | 없음 | **q_norm/k_norm (per-head, head_dim=128)** | **model.py 핵심 수정** — prefill은 RoPE 전에 per-head RMSNorm, decode는 megakernel `rmsnorm_QK_pre_rope_enabled=True`, weight mapping 2개 추가(TP 샤딩 없음) |
-| RoPE | theta 5e5 + llama3 rope_scaling | theta **1e6**, scaling **없음** | Llama3 piecewise scaling 코드 제거, 표준 rotate_half |
-| rms_norm_eps | 1e-5 | **1e-6** | config.py |
-| lm_head | 있음 | **없음** (임베딩 체크포인트) | model_embedding.py — lm_head 제거, weight key도 `model.` prefix 없음 |
-| 출력 | logits → 샘플링 | **[T,H] hidden → LAST pooling → L2 normalize** | forward가 hidden states 반환, vLLM pooling 러너(DispatchPooler)가 처리. **prefill-only** (decode 그래프 없음) |
-| architectures | LlamaForCausalLM | **Qwen3ForCausalLM** (임베딩도 동일!) | 등록 키는 `Qwen3ForCausalLM`, 임베딩 여부는 `--runner pooling`이 결정 |
+| 1 | Attention 방식 | heads 32/8·head_dim 128 동일. `layer_types`=전부 full_attention, sliding window 없음. **구조 dump에서 `q_norm`/`k_norm` (per-head RMSNorm, dim=128) 발견 — Llama에 없는 최대 diff** | `model.py` — QK-norm을 RoPE **이전에** per-head 적용 (prefill: torch, decode: megakernel `rmsnorm_QK_pre_rope_enabled=True`), weight mapping 2개 추가(TP 샤딩 없음) |
+| 2 | Heterogeneous Layers | 없음 (36층 모두 동일) | — |
+| 3 | Position Encoding | `rope_theta` 5e5→**1e6**, `rope_scaling` llama3 piecewise→**None** | `model.py` — Llama3 스케일링 삭제, 표준 rotate_half |
+| 4 | MLP/Activation | `hidden_act` silu 동일, `intermediate_size` 14336→**12288** | 치수만 변경, NF 경로 호환 |
+| 5 | Normalization | `rms_norm_eps` 1e-5→**1e-6** (타입은 동일 RMSNorm) | `config.py` |
+| 6 | Config 구조 | 둘 다 top-level (nested 없음) | `from_configs()` 그대로 |
+| 7 | Embedding | `vocab_size` 128256→**151665**, tie 없음 | embed_tokens 치수 |
+| 8 | Special features | **임베딩 체크포인트**: lm_head 없음, weight key에 `model.` prefix 없음, sentence-transformers 메타(modules.json: Transformer→LAST Pooling→Normalize), `architectures`는 여전히 `Qwen3ForCausalLM` | `model_embedding.py` + `--runner pooling` |
 
-## Stage 1–2 — Implement + Register
+## Stage 1: Implement (모델 구현)
 
-`src/qwen3_embedding/`은 vllm-neuron의 `vllm_neuron/model/llama3/` 템플릿을 복사해
-위 diff를 적용한 포팅입니다 (upstream vllm-neuron은 Apache-2.0; 파일 헤더에
-수정 내역 주석). 등록은 온보딩 가이드대로 `vllm_neuron/model/registry.py`를 통합니다 —
-`NeuronWorker.__init__`이 worker 프로세스마다 이 registry로 vLLM ModelRegistry를
-덮어쓰기 때문에, 단순 `ModelRegistry.register_model()`만으로는 부족합니다.
+가이드의 디렉토리 구조를 따랐습니다 (llama3 템플릿 복사 → 수정):
+
+```text
+src/model/qwen3_embedding/
+├── __init__.py
+├── config.py            # HF PretrainedConfig → dataclass, from_configs()
+├── factory.py           # 러너 타입 검사 → 구현 선택, config 검증
+├── model.py             # 백본: forward/get_kv_spec/bind_kv_cache/load_weights
+├── model_embedding.py   # 임베딩 variant: lm_head 제거, [T,H] hidden 반환
+└── register.py          # Stage 2 등록 스니펫
+```
+
+사용한 Building Blocks: `NF.qkv_proj`, `NF.flash_attention`, `NF.segmented_attention`,
+`NF.o_proj`, `vllm_neuron.nn.VocabDimShardedEmbedding`, `fused_qkv_weight_loader`,
+`sharding_weight_loader`, `KVSpec`/`LayerSpec`, `get_tp_group()` collectives.
+
+임베딩 모델 특이사항: forward가 logits 대신 **flatten된 `[T, H]` post-norm hidden
+states**를 반환하고, vLLM pooling 러너(DispatchPooler)가 LAST-token pooling + L2
+normalize를 수행합니다. decode 단계가 없어 prefill 그래프만 컴파일됩니다.
+
+## Stage 2: Register (모델 등록)
+
+가이드의 등록 코드는 `src/model/qwen3_embedding/register.py`:
+
+```python
+from vllm import ModelRegistry
+from .factory import Qwen3EmbeddingForCausalLM
+
+ModelRegistry.register_model(
+    "Qwen3ForCausalLM",   # ← HF config.json의 "architectures" 필드와 일치
+    Qwen3EmbeddingForCausalLM,
+)
+```
+
+단, Neuron plugin에서는 `NeuronWorker.__init__`이 worker 프로세스마다
+`vllm_neuron.model.registry`로 vLLM ModelRegistry를 **다시 덮어쓰기** 때문에,
+위 호출만으로는 built-in Qwen3 구현이 이깁니다. 그래서 설치 스크립트가 모델
+디렉토리를 플러그인 안으로 복사하고 registry를 우리 구현으로 패치합니다:
 
 ```bash
-# 서빙 환경(컨테이너/venv) 안에서:
 python3 scripts/install_into_plugin.py
 # [install] verified: Qwen3ForCausalLM -> vllm_neuron.model.qwen3_embedding...
 ```
 
-## Stage 3 — Compile & Smoke Test (trn2.3xlarge)
+## Stage 3: Compile & Smoke Test
+
+가이드의 오프라인 스모크 (`LLM` — 임베딩 모델이므로 `generate` 대신 `embed`):
 
 ```bash
-./scripts/setup_env.sh venv          # 또는: ./scripts/setup_env.sh dlc <image-uri>
-python3 scripts/install_into_plugin.py
-./scripts/launch_server.sh           # TP=4, --runner pooling, 최초 기동 시 NEFF 컴파일
-python3 scripts/smoke_test.py        # health / 4096-dim / L2 norm / 의미 순위 검증
+python3 scripts/offline_embed.py     # LLM(runner="pooling", TP=4) + llm.embed()
 ```
 
-서버 로그에 `[NDD-D2-CHALLENGE] Using challenge Qwen3ForEmbedding ...`이 찍히면
-빌트인 구현이 아닌 이 레포의 구현이 실행되고 있는 것입니다.
+```
+dim=4096  first3=[0.0204, -0.0047, 0.0026]  | Retrieval-augmented generation grounds a
+dim=4096  first3=[0.013, 0.0038, -0.0003]   | def add(a, b):
+dim=4096  first3=[0.0448, 0.0146, -0.0232]  | 당근마켓은 동네 이웃 간의 중고거래 플랫폼입니다.
+dim=4096  first3=[-0.0113, 0.0226, 0.0198]  | Photosynthesis converts sunlight, water,
+```
 
-임베딩 모델은 decode 단계가 없어 prefill 그래프만 컴파일됩니다
-(`num_batched_tokens_buckets`가 컴파일되는 shape을 결정).
-
-## Stage 4 — Accuracy (MTEB)
+온라인 서버 + 스모크:
 
 ```bash
-pip install "mteb>=1.25" numpy requests
-python3 scripts/eval_mteb.py
+./scripts/launch_server.sh           # vllm serve --runner pooling, TP=4
+python3 scripts/smoke_test.py
+# [1/4] /health OK
+# [2/4] 3 embeddings, dim=4096 OK
+# [3/4] L2-normalized OK (norms=[1.0, 1.0, 1.0])
+# [4/4] cos(query, Paris doc)=0.6442  cos(query, mitochondria doc)=0.1464
+# SMOKE TEST PASSED
 ```
 
-쿼리에는 공식 Qwen3 instruction 템플릿(`Instruct: {task}\nQuery: {text}`)을 적용하고
-문서는 그대로 임베딩합니다.
+첫 실행에서 모든 bucket의 NEFF 컴파일이 이뤄지고(수 분~수십 분), 이후에는
+compile cache를 재사용합니다. 서버 로그의 `[NDD-D2-CHALLENGE]` 마커로 built-in이
+아닌 본 레포 구현이 실행됨을 확인했습니다.
 
-**측정 결과 (2026-08-24, trn2.3xlarge TP=4, BF16, 본 레포 구현):**
+## Stage 4: Validate Accuracy
 
-| Task | Metric | 공식 MTEB (published) | Neuron BF16 (공식 레시피) | **본 구현** | Δ vs published |
-|---|---|---|---|---|---|
-| STS12 | Spearman | 0.8614 | 0.8639 | **0.8639** | +0.0025 |
-| NFCorpus | NDCG@10 | 0.4145 | 0.4143 | **0.4159** | +0.0014 |
-| SciFact | NDCG@10 | 0.7846 | 0.7839 | **0.7859** | +0.0013 |
+가이드의 3-Level 검증 프레임워크를 임베딩 모델에 맞게 적용:
 
-세 태스크 모두 published 점수 대비 ±0.005 이내 → PASS. STS12는 공식 레시피의
-Neuron BF16 값(0.8639)과 소수 4자리까지 일치합니다. 원본:
-[`results/mteb_summary.json`](results/mteb_summary.json)
+| Level | 가이드 | 본 챌린지 적용 | 결과 |
+|---|---|---|---|
+| L1: Task-level | lm_eval, longbench | **MTEB** (STS12/NFCorpus/SciFact — 챌린지 지정) | ✅ 아래 표 |
+| L2: Prompt-level | teacher-forcing logit 3-way 비교 | **임베딩 벡터 3-way 비교** (Neuron vs HF FP32 vs HF BF16) | ✅ PASS |
+| L3: Module-level | attention/MLP 단위 테스트 | 미수행 (L1+L2 통과로 생략) | — |
 
-스모크 테스트 결과 (Stage 3):
-
-```
-[1/4] /health OK
-[2/4] 3 embeddings, dim=4096 OK
-[3/4] L2-normalized OK (norms=[1.0, 1.0, 1.0])
-[4/4] cos(query, Paris doc)=0.6442  cos(query, mitochondria doc)=0.1464
-SMOKE TEST PASSED
-```
-
-## Stage 5 — Benchmark
+### L2: Three-Way Comparison
 
 ```bash
-python3 scripts/benchmark.py --concurrency 8 --batch-size 8 --num-requests 200
+~/mteb-venv/bin/python scripts/accuracy_three_way.py
 ```
 
-**측정 결과 (~64단어/텍스트, trn2.3xlarge TP=4):**
+```
+neuron_vs_fp32   max|Δ|=0.00369 mean|Δ|=0.000154 min_cos=0.999898
+bf16_vs_fp32     max|Δ|=0.00296 mean|Δ|=0.000154 min_cos=0.999895
+neuron_vs_bf16   max|Δ|=0.00338 mean|Δ|=0.000199 min_cos=0.999831
+PASS: neuron_err=0.00369 vs bf16_err=0.00296 (allowed <= 2x + 1e-4)
+```
 
-| concurrency × batch | embeddings/sec | requests/sec | p50 | p99 |
+해석 (가이드 기준): **Neuron 오차 ≈ BF16 오차 → 정상.** mean |Δ|는 소수 6자리까지
+동일 — Neuron 실행의 수치 오차가 BF16 캐스팅 노이즈 수준 그 자체입니다.
+
+### L1: MTEB (2026-08-24, trn2.3xlarge TP=4, BF16)
+
+```bash
+~/mteb-venv/bin/python scripts/eval_mteb.py
+```
+
+| Task | Metric | 공식 MTEB (published) | Neuron BF16 (공식 레시피) | **본 구현** |
 |---|---|---|---|---|
-| 1 × 1 (레이턴시) | 32.0 | 32.0 | **31.1 ms** | 33.3 ms |
-| 8 × 8 | **38.1** | 4.77 | 1620 ms | 1651 ms |
-| 16 × 16 | 35.8 | 2.24 | 6487 ms | 6553 ms |
+| STS12 | Spearman | 0.8614 | 0.8639 | **0.8639** |
+| NFCorpus | NDCG@10 | 0.4145 | 0.4143 | **0.4159** |
+| SciFact | NDCG@10 | 0.7846 | 0.7839 | **0.7859** |
 
-단일 요청 레이턴시 ~31ms, 처리량은 c8×b8 부근(~38 emb/s)에서 포화됩니다 —
-8B 모델의 prefill이 compute-bound라 동시성을 더 올려도 큐잉만 늘어납니다.
-원본: [`results/bench_*.json`](results/)
+세 태스크 모두 published 대비 ±0.005 이내. 쿼리에는 공식 Qwen3 instruction
+템플릿(`Instruct: {task}\nQuery: {text}`)을 적용, 문서는 그대로 임베딩.
+
+## Stage 5: Benchmark & Tune
+
+가이드의 벤치마크 방식 그대로 (`vllm bench serve`, 임베딩 백엔드):
+
+```bash
+./scripts/launch_server.sh
+vllm bench serve --backend openai-embeddings --model Qwen/Qwen3-Embedding-8B \
+    --dataset-name random --random-input-len 128 --num-prompts 200
+```
+
+**측정 결과** (request rate ∞, concurrency 무제한 — E2EL은 큐잉 포함):
+
+| dataset | 요청 수 | Request throughput | Token throughput | Mean E2EL | P99 E2EL |
+|---|---|---|---|---|---|
+| random, input-len 128 | 200 | **38.67 req/s** | 4,950 tok/s | 2,637 ms | 5,106 ms |
+| random, input-len 1024 | 100 | 13.57 req/s | **13,896 tok/s** | 3,737 ms | 7,283 ms |
+
+입력이 길어질수록 토큰 처리량이 크게 오릅니다(4.9k → 13.9k tok/s) — prefill이
+큰 배치 토큰 수에서 더 효율적이라는 뜻이고, 짧은 요청 구간의 ~38 req/s는 아래
+closed-loop 측정의 ~38 emb/s 포화점과 일치합니다.
+원본: [`results/vllm_bench_in128.json`](results/vllm_bench_in128.json),
+[`results/vllm_bench_in1024.json`](results/vllm_bench_in1024.json)
+
+보조 벤치마크 (`scripts/benchmark.py`, ~64단어 텍스트, closed-loop):
+
+| concurrency × batch | embeddings/sec | p50 | p99 |
+|---|---|---|---|
+| 1 × 1 | 32.0 | 31.1 ms | 33.3 ms |
+| 8 × 8 | **38.1** | 1620 ms | 1651 ms |
+| 16 × 16 | 35.8 | 6487 ms | 6553 ms |
+
+Tuning 적용 사항: `num_batched_tokens_buckets=[128..4096]` (prefill bucket),
+`--no-enable-prefix-caching` (짧은 무공유 요청엔 segmented prefill 오버헤드 회피).
+decode bucket / on-device sampling / FP8 KV cache는 임베딩(prefill-only) 모델에
+해당 없음.
 
 ## 트러블슈팅 기록 (소스 설치 시)
 
@@ -148,6 +220,9 @@ python3 scripts/benchmark.py --concurrency 8 --batch-size 8 --num-requests 200
 5. **버킷 규칙**: `num_batched_tokens_buckets`의 마지막 값 = `--max-num-batched-tokens`
    (vLLM 기본 2048). 튜토리얼의 `[128..4096]` 버킷은 `--max-num-batched-tokens 4096`을
    전제로 합니다.
+6. **오프라인 `LLM()`도 APC를 꺼야 합니다**: single-shot prefill
+   (`max_num_batched_tokens == max_model_len`)에서는 `enable_prefix_caching=False`
+   없이는 기동이 거부됩니다.
 
 검증 기준 버전 (DLC `vllm/inference/0.24.0.1.1.0/Dockerfile.neuronx` 고정값):
 `neuronx-cc==2.27.5334.0+f702b353`, `nki==0.6.0+31049202112.g85070674`,
@@ -157,8 +232,6 @@ python3 scripts/benchmark.py --concurrency 8 --batch-size 8 --num-requests 200
 
 - `--runner pooling` 필수: 체크포인트의 architectures가 `Qwen3ForCausalLM`이라
   플래그 없이는 생성 모델로 로드됩니다.
-- 짧은 요청 위주 임베딩 워크로드에는 `--no-enable-prefix-caching`이 유리
-  (segmented prefill 오버헤드 회피).
 - 출력 벡터는 L2-normalized — 클라이언트에서 dot product가 곧 cosine similarity.
 - Matryoshka(차원 축소)를 쓰려면 `--hf-overrides '{"is_matryoshka": true}'`로 기동
   후 요청에 `dimensions` 지정.

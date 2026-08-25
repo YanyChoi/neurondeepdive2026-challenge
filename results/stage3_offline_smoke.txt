@@ -1,0 +1,4 @@
+dim=4096  first3=[0.0204, -0.0047, 0.0026]  | Retrieval-augmented generation grounds a
+dim=4096  first3=[0.013, 0.0038, -0.0003]  | def add(a, b):
+dim=4096  first3=[0.0448, 0.0146, -0.0232]  | 당근마켓은 동네 이웃 간의 중고거래 플랫폼입니다.
+dim=4096  first3=[-0.0113, 0.0226, 0.0198]  | Photosynthesis converts sunlight, water,

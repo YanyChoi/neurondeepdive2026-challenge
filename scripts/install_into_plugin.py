@@ -24,7 +24,7 @@ import shutil
 import sys
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parent.parent / "src" / "qwen3_embedding"
+SRC = Path(__file__).resolve().parent.parent / "src" / "model" / "qwen3_embedding"
 UPSTREAM_IMPORT = "from .qwen3 import Qwen3ForCausalLM"
 CHALLENGE_IMPORT = (
     "from .qwen3_embedding import Qwen3ForCausalLM  # NDD-D2-CHALLENGE override"

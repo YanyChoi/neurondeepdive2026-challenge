@@ -86,15 +86,25 @@ WHAT CARRIES OVER FROM THE llama3/ TEMPLATE UNCHANGED
 
 def load_config(local: Path, repo_id: str, fetch: bool) -> dict:
     if fetch:
-        url = f"https://huggingface.co/{repo_id}/raw/main/config.json"
-        req = urllib.request.Request(url)
-        import os
+        # Same path as the official arch_diff_analysis.py: AutoConfig honors
+        # HF auth (HF_TOKEN / HUGGING_FACE_HUB_TOKEN env, or the token stored
+        # by `hf auth login`), which the gated Llama repo requires.
+        try:
+            from transformers import AutoConfig
 
-        tok = os.environ.get("HF_TOKEN")
-        if tok:
-            req.add_header("Authorization", f"Bearer {tok}")
-        with urllib.request.urlopen(req) as r:
-            return json.load(r)
+            return AutoConfig.from_pretrained(repo_id).to_dict()
+        except ImportError:
+            url = f"https://huggingface.co/{repo_id}/raw/main/config.json"
+            req = urllib.request.Request(url)
+            import os
+
+            tok = os.environ.get("HF_TOKEN") or os.environ.get(
+                "HUGGING_FACE_HUB_TOKEN"
+            )
+            if tok:
+                req.add_header("Authorization", f"Bearer {tok}")
+            with urllib.request.urlopen(req) as r:
+                return json.load(r)
     return json.loads(local.read_text())
 
 

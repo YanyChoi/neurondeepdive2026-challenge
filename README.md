@@ -29,9 +29,15 @@ scripts/
 
 ## Step 0 — 아키텍처 Diff 분석
 
+온보딩 가이드의 공식 스크립트 그대로 (`MODEL_B`만 Qwen3-Embedding-8B로 지정):
+
 ```bash
-python3 step0_arch_diff.py
+# meta-llama/Llama-3.1-8B는 gated → hf auth login 필요
+python3 arch_diff_analysis.py        # 출력: results/step0_official_output.txt
 ```
+
+보조 스크립트 `step0_arch_diff.py`는 같은 비교를 HF 토큰 없이(bundled config)
+수행하고, 필드별로 어느 코드가 바뀌는지 주석을 답니다.
 
 config.json 필드 비교 + 체크포인트 구조 비교 결과 요약:
 

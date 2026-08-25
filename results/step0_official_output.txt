@@ -1,0 +1,95 @@
+================================================================================
+  1. config.json 비교
+================================================================================
+
+Key                                      meta-llama/Llama-3.1-8B        Qwen/Qwen3-Embedding-8B       
+----------------------------------------------------------------------------------------------------
+
+### 값이 다른 필드 ###
+  architectures                          ['LlamaForCausalLM']           ['Qwen3ForCausalLM']
+  bos_token_id                           128000                         151643
+  eos_token_id                           128001                         151645
+  intermediate_size                      14336                          12288
+  max_position_embeddings                131072                         40960
+  model_type                             llama                          qwen3
+  num_hidden_layers                      32                             36
+  rms_norm_eps                           1e-05                          1e-06
+  rope_scaling                           {'factor': 8.0, 'low_freq_fa   None
+  rope_theta                             500000.0                       1000000
+  vocab_size                             128256                         151665
+
+### Qwen/Qwen3-Embedding-8B에만 있는 필드 (4개) ###
+  layer_types                            = ['full_attention', 'full_attention', 'full_attenti
+  max_window_layers                      = 36
+  sliding_window                         = None
+  use_sliding_window                     = False
+
+### meta-llama/Llama-3.1-8B에만 있는 필드 (2개) ###
+  mlp_bias                               = False
+  pretraining_tp                         = 1
+
+
+
+================================================================================
+  2. 모델 구조 출력 (weight 로드 없음, 메모리 0)
+================================================================================
+
+### meta-llama/Llama-3.1-8B 구조 ###
+
+  LlamaForCausalLM(
+    (model): LlamaModel(
+      (embed_tokens): Embedding(128256, 4096)
+      (layers): ModuleList(
+        (0-31): 32 x LlamaDecoderLayer(
+          (self_attn): LlamaAttention(
+            (q_proj): Linear(in_features=4096, out_features=4096, bias=False)
+            (k_proj): Linear(in_features=4096, out_features=1024, bias=False)
+            (v_proj): Linear(in_features=4096, out_features=1024, bias=False)
+            (o_proj): Linear(in_features=4096, out_features=4096, bias=False)
+          )
+          (mlp): LlamaMLP(
+            (gate_proj): Linear(in_features=4096, out_features=14336, bias=False)
+            (up_proj): Linear(in_features=4096, out_features=14336, bias=False)
+            (down_proj): Linear(in_features=14336, out_features=4096, bias=False)
+            (act_fn): SiLUActivation()
+          )
+          (input_layernorm): LlamaRMSNorm((4096,), eps=1e-05)
+          (post_attention_layernorm): LlamaRMSNorm((4096,), eps=1e-05)
+        )
+      )
+      (norm): LlamaRMSNorm((4096,), eps=1e-05)
+      (rotary_emb): LlamaRotaryEmbedding()
+    )
+    (lm_head): Linear(in_features=4096, out_features=128256, bias=False)
+  )
+
+### Qwen/Qwen3-Embedding-8B 구조 ###
+
+  Qwen3ForCausalLM(
+    (model): Qwen3Model(
+      (embed_tokens): Embedding(151665, 4096)
+      (layers): ModuleList(
+        (0-35): 36 x Qwen3DecoderLayer(
+          (self_attn): Qwen3Attention(
+            (q_proj): Linear(in_features=4096, out_features=4096, bias=False)
+            (k_proj): Linear(in_features=4096, out_features=1024, bias=False)
+            (v_proj): Linear(in_features=4096, out_features=1024, bias=False)
+            (o_proj): Linear(in_features=4096, out_features=4096, bias=False)
+            (q_norm): Qwen3RMSNorm((128,), eps=1e-06)
+            (k_norm): Qwen3RMSNorm((128,), eps=1e-06)
+          )
+          (mlp): Qwen3MLP(
+            (gate_proj): Linear(in_features=4096, out_features=12288, bias=False)
+            (up_proj): Linear(in_features=4096, out_features=12288, bias=False)
+            (down_proj): Linear(in_features=12288, out_features=4096, bias=False)
+            (act_fn): SiLUActivation()
+          )
+          (input_layernorm): Qwen3RMSNorm((4096,), eps=1e-06)
+          (post_attention_layernorm): Qwen3RMSNorm((4096,), eps=1e-06)
+        )
+      )
+      (norm): Qwen3RMSNorm((4096,), eps=1e-06)
+      (rotary_emb): Qwen3RotaryEmbedding()
+    )
+    (lm_head): Linear(in_features=4096, out_features=151665, bias=False)
+  )
